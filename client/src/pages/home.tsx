@@ -1,6 +1,4 @@
-import { useState, useEffect, useRef } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
-import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -20,10 +18,16 @@ import {
   Zap,
   Eye,
   ShoppingBag,
-  ArrowRight,
   Clock,
 } from "lucide-react";
-import type { Scan, Violation, AgentStep } from "@shared/schema";
+import {
+  crawlPage,
+  analyzeViolations,
+  generateReport,
+  shopifyFixerRecommend,
+  type Violation,
+  type AgentStep,
+} from "@/lib/nemotron";
 
 const GRADE_COLORS: Record<string, string> = {
   A: "bg-emerald-500",
@@ -55,7 +59,7 @@ function AgentTimeline({ steps }: { steps: AgentStep[] }) {
           data-testid={`agent-step-${i}`}
         >
           <div className="flex-shrink-0 w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-sm">
-            {step.agent.charAt(0) === "🕷" ? "🕷️" : step.agent.charAt(0) === "🔍" ? "🔍" : step.agent.charAt(0) === "📊" ? "📊" : step.agent.charAt(0) === "🔧" ? "🔧" : "⚡"}
+            {step.agent.includes("Crawler") ? "🕷️" : step.agent.includes("Analyzer") ? "🔍" : step.agent.includes("Reporter") ? "📊" : step.agent.includes("Fixer") ? "🔧" : "⚡"}
           </div>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
@@ -135,60 +139,125 @@ function ScoreDisplay({ score, grade }: { score: number; grade: string }) {
   );
 }
 
+interface ScanResult {
+  score: number;
+  grade: string;
+  violations: Violation[];
+  fixes: any[];
+  criticalCount: number;
+  seriousCount: number;
+  moderateCount: number;
+  minorCount: number;
+}
+
 export default function HomePage() {
   const [url, setUrl] = useState("https://originsnyc.com");
   const [apiKey, setApiKey] = useState("");
   const [enableShopify, setEnableShopify] = useState(true);
-  const [activeScanId, setActiveScanId] = useState<number | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [statusText, setStatusText] = useState("");
+  const [agentLog, setAgentLog] = useState<AgentStep[]>([]);
+  const [result, setResult] = useState<ScanResult | null>(null);
   const { toast } = useToast();
 
-  // Poll active scan
-  const { data: activeScan } = useQuery<Scan>({
-    queryKey: ["/api/scan", activeScanId],
-    queryFn: () => apiRequest("GET", `/api/scan/${activeScanId}`).then((r) => r.json()),
-    enabled: !!activeScanId,
-    refetchInterval: (query) => {
-      const scan = query.state.data;
-      if (scan && (scan.status === "complete" || scan.status === "error")) return false;
-      return 1500;
-    },
-  });
+  const addLog = useCallback((agent: string, action: string, details: string) => {
+    setAgentLog((prev) => [
+      ...prev,
+      { agent, action, timestamp: new Date().toISOString(), details },
+    ]);
+  }, []);
 
-  const scanMutation = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/scan", {
-        url,
-        apiKey,
-        enableShopifyFix: enableShopify,
-      });
-      return res.json();
-    },
-    onSuccess: (data: { scanId: number }) => {
-      setActiveScanId(data.scanId);
-      toast({
-        title: "Scan started",
-        description: "4-agent pipeline activated",
-      });
-    },
-    onError: (err: Error) => {
-      toast({
-        title: "Scan failed",
-        description: err.message,
-        variant: "destructive",
-      });
-    },
-  });
+  const runScan = useCallback(async () => {
+    if (!url || !apiKey) {
+      toast({ title: "Missing fields", description: "URL and API key are required", variant: "destructive" });
+      return;
+    }
 
-  const isRunning = activeScan && !["complete", "error"].includes(activeScan.status);
-  const statusProgress: Record<string, number> = {
-    pending: 0,
-    crawling: 20,
-    analyzing: 45,
-    reporting: 70,
-    fixing: 85,
-    complete: 100,
-    error: 0,
-  };
+    setIsRunning(true);
+    setProgress(0);
+    setAgentLog([]);
+    setResult(null);
+
+    try {
+      // Agent 1: Crawler
+      setStatusText("Crawling...");
+      setProgress(10);
+      addLog("🕷️ Crawler Agent", "Fetching page content", `Navigating to ${url}`);
+
+      const crawlData = await crawlPage(url);
+      setProgress(25);
+      addLog(
+        "🕷️ Crawler Agent",
+        "Page analyzed",
+        `Found: ${crawlData.elements.images?.total || 0} images, ${crawlData.elements.links || 0} links, ${crawlData.elements.headings || 0} headings, ${crawlData.elements.ariaAttributes || 0} ARIA attrs`
+      );
+
+      // Agent 2: Analyzer (Nemotron)
+      setStatusText("Analyzing with Nemotron...");
+      setProgress(35);
+      addLog("🔍 Analyzer Agent", "Running Nemotron WCAG analysis", "Using nvidia/nemotron-3-nano-30b-a3b for violation detection");
+
+      const violations = await analyzeViolations(crawlData, apiKey);
+      const criticalCount = violations.filter((v) => v.impact === "critical").length;
+      const seriousCount = violations.filter((v) => v.impact === "serious").length;
+      const moderateCount = violations.filter((v) => v.impact === "moderate").length;
+      const minorCount = violations.filter((v) => v.impact === "minor").length;
+
+      setProgress(55);
+      addLog(
+        "🔍 Analyzer Agent",
+        "Violations identified",
+        `Found ${violations.length} violations: ${criticalCount} critical, ${seriousCount} serious, ${moderateCount} moderate, ${minorCount} minor`
+      );
+
+      // Agent 3: Reporter (Nemotron)
+      setStatusText("Generating report...");
+      setProgress(70);
+      addLog("📊 Reporter Agent", "Generating accessibility report", "Nemotron computing score and summary");
+
+      const report = await generateReport(violations, crawlData, apiKey);
+      setProgress(80);
+      addLog("📊 Reporter Agent", "Report complete", `Score: ${report.score}/100 (${report.grade}) - ${report.summary}`);
+
+      // Agent 4: Shopify Fixer
+      let fixes: any[] = [];
+      if (enableShopify) {
+        setStatusText("Generating Shopify fixes...");
+        setProgress(90);
+        addLog("🔧 Shopify Fixer Agent", "Analyzing fixable violations", "Generating Shopify Admin API mutations for originsnyc.com");
+
+        fixes = await shopifyFixerRecommend(violations, apiKey);
+        addLog(
+          "🔧 Shopify Fixer Agent",
+          "Fix recommendations ready",
+          `${fixes.length} Shopify API fixes recommended for originsnyc.com`
+        );
+      }
+
+      setProgress(100);
+      setStatusText("Complete");
+      setResult({
+        score: report.score,
+        grade: report.grade,
+        violations,
+        fixes,
+        criticalCount,
+        seriousCount,
+        moderateCount,
+        minorCount,
+      });
+
+      addLog("✅ Pipeline", "All 4 agents complete", `Score: ${report.score}/100 | ${violations.length} violations | ${fixes.length} fixes`);
+
+      toast({ title: "Scan complete", description: `Score: ${report.score}/100 (${report.grade})` });
+    } catch (err: any) {
+      addLog("❌ Error", "Pipeline failed", err.message);
+      toast({ title: "Scan failed", description: err.message, variant: "destructive" });
+    } finally {
+      setIsRunning(false);
+    }
+  }, [url, apiKey, enableShopify, addLog, toast]);
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
@@ -225,13 +294,13 @@ export default function HomePage() {
           </h2>
           <p className="text-sm text-zinc-400 max-w-xl mx-auto">
             Multi-agent AI system that crawls your site, analyzes WCAG compliance
-            using NVIDIA Nemotron, generates a report, and auto-fixes issues via
-            Shopify Admin API.
+            using NVIDIA Nemotron, generates a report, and recommends Shopify API
+            fixes for originsnyc.com.
           </p>
         </div>
 
         {/* Agent Architecture */}
-        <div className="grid grid-cols-4 gap-3 mb-8">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
           {[
             { icon: Globe, name: "Crawler", desc: "Fetches & parses HTML DOM", color: "text-blue-400" },
             { icon: Eye, name: "Analyzer", desc: "Nemotron WCAG analysis", color: "text-purple-400" },
@@ -243,9 +312,6 @@ export default function HomePage() {
                 <agent.icon className={`w-6 h-6 mx-auto mb-2 ${agent.color}`} />
                 <p className="text-sm font-medium">{agent.name}</p>
                 <p className="text-xs text-zinc-500">{agent.desc}</p>
-                {i < 3 && (
-                  <ArrowRight className="w-4 h-4 text-zinc-600 absolute right-0 top-1/2 -translate-y-1/2 translate-x-1/2 hidden md:block" />
-                )}
               </CardContent>
             </Card>
           ))}
@@ -290,8 +356,8 @@ export default function HomePage() {
               </div>
               <Button
                 data-testid="button-scan"
-                onClick={() => scanMutation.mutate()}
-                disabled={!url || !apiKey || scanMutation.isPending || !!isRunning}
+                onClick={runScan}
+                disabled={!url || !apiKey || isRunning}
                 className="bg-green-600 hover:bg-green-700"
               >
                 {isRunning ? (
@@ -316,18 +382,16 @@ export default function HomePage() {
             <div className="flex items-center justify-between mb-2">
               <span className="text-sm text-zinc-400 capitalize flex items-center gap-2">
                 <Loader2 className="w-3 h-3 animate-spin" />
-                {activeScan?.status}...
+                {statusText}
               </span>
-              <span className="text-sm text-zinc-500">
-                {statusProgress[activeScan?.status || "pending"]}%
-              </span>
+              <span className="text-sm text-zinc-500">{progress}%</span>
             </div>
-            <Progress value={statusProgress[activeScan?.status || "pending"]} className="h-2" />
+            <Progress value={progress} className="h-2" />
           </div>
         )}
 
         {/* Results */}
-        {activeScan && activeScan.status === "complete" && (
+        {result && (
           <div className="space-y-6">
             {/* Score + Summary */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -336,9 +400,7 @@ export default function HomePage() {
                   <CardTitle className="text-sm text-zinc-400">Score</CardTitle>
                 </CardHeader>
                 <CardContent className="flex justify-center">
-                  {activeScan.score !== null && activeScan.grade && (
-                    <ScoreDisplay score={activeScan.score} grade={activeScan.grade} />
-                  )}
+                  <ScoreDisplay score={result.score} grade={result.grade} />
                 </CardContent>
               </Card>
 
@@ -349,10 +411,10 @@ export default function HomePage() {
                 <CardContent>
                   <div className="grid grid-cols-4 gap-3 mb-4">
                     {[
-                      { label: "Critical", count: activeScan.criticalCount || 0, color: "text-red-400" },
-                      { label: "Serious", count: activeScan.seriousCount || 0, color: "text-orange-400" },
-                      { label: "Moderate", count: activeScan.moderateCount || 0, color: "text-yellow-400" },
-                      { label: "Minor", count: activeScan.minorCount || 0, color: "text-blue-400" },
+                      { label: "Critical", count: result.criticalCount, color: "text-red-400" },
+                      { label: "Serious", count: result.seriousCount, color: "text-orange-400" },
+                      { label: "Moderate", count: result.moderateCount, color: "text-yellow-400" },
+                      { label: "Minor", count: result.minorCount, color: "text-blue-400" },
                     ].map((s) => (
                       <div key={s.label} className="text-center">
                         <p className={`text-2xl font-bold ${s.color}`}>{s.count}</p>
@@ -361,24 +423,24 @@ export default function HomePage() {
                     ))}
                   </div>
                   <p className="text-sm text-zinc-300">
-                    Total: {activeScan.totalViolations} violations found on{" "}
-                    <span className="text-green-400">{activeScan.url}</span>
+                    Total: {result.violations.length} violations found on{" "}
+                    <span className="text-green-400">{url}</span>
                   </p>
                 </CardContent>
               </Card>
             </div>
 
             {/* Violations List */}
-            {activeScan.violations && activeScan.violations.length > 0 && (
+            {result.violations.length > 0 && (
               <Card className="bg-zinc-900 border-zinc-800">
                 <CardHeader>
                   <CardTitle className="text-sm flex items-center gap-2">
                     <AlertTriangle className="w-4 h-4 text-yellow-400" />
-                    WCAG Violations ({activeScan.violations.length})
+                    WCAG Violations ({result.violations.length})
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  {(activeScan.violations as Violation[]).map((v, i) => (
+                  {result.violations.map((v, i) => (
                     <ViolationCard key={i} violation={v} />
                   ))}
                 </CardContent>
@@ -386,44 +448,31 @@ export default function HomePage() {
             )}
 
             {/* Shopify Fixes */}
-            {activeScan.fixes && (activeScan.fixes as any[]).length > 0 && (
+            {result.fixes.length > 0 && (
               <Card className="bg-zinc-900 border-zinc-800">
                 <CardHeader>
                   <CardTitle className="text-sm flex items-center gap-2">
                     <ShoppingBag className="w-4 h-4 text-green-400" />
-                    Shopify Auto-Fixes ({(activeScan.fixes as any[]).length})
+                    Shopify Fix Recommendations ({result.fixes.length})
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  {(activeScan.fixes as any[]).map((fix: any, i: number) => (
+                  {result.fixes.map((fix: any, i: number) => (
                     <div
                       key={i}
-                      className="flex items-center gap-3 p-3 rounded-lg bg-zinc-800/50 border border-zinc-700"
+                      className="p-3 rounded-lg bg-zinc-800/50 border border-zinc-700"
                       data-testid={`fix-${i}`}
                     >
-                      {fix.status === "applied" ? (
-                        <CheckCircle2 className="w-5 h-5 text-green-400 shrink-0" />
-                      ) : fix.status === "failed" ? (
-                        <XCircle className="w-5 h-5 text-red-400 shrink-0" />
-                      ) : (
-                        <Clock className="w-5 h-5 text-yellow-400 shrink-0" />
-                      )}
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm">{fix.action}</p>
-                        <p className="text-xs text-zinc-500">{fix.details}</p>
+                      <div className="flex items-center gap-2 mb-2">
+                        <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" />
+                        <p className="text-sm font-medium">{fix.action || "Shopify API Fix"}</p>
                       </div>
-                      <Badge
-                        variant="outline"
-                        className={
-                          fix.status === "applied"
-                            ? "text-green-400 border-green-500/30"
-                            : fix.status === "failed"
-                            ? "text-red-400 border-red-500/30"
-                            : "text-yellow-400 border-yellow-500/30"
-                        }
-                      >
-                        {fix.status}
-                      </Badge>
+                      <p className="text-xs text-zinc-400 mb-2">{fix.details}</p>
+                      {fix.shopifyCode && (
+                        <pre className="text-xs bg-black/30 p-2 rounded overflow-x-auto text-green-300">
+                          {fix.shopifyCode}
+                        </pre>
+                      )}
                     </div>
                   ))}
                 </CardContent>
@@ -433,7 +482,7 @@ export default function HomePage() {
         )}
 
         {/* Agent Log */}
-        {activeScan?.agentLog && (activeScan.agentLog as AgentStep[]).length > 0 && (
+        {agentLog.length > 0 && (
           <Card className="bg-zinc-900 border-zinc-800 mt-6">
             <CardHeader>
               <CardTitle className="text-sm flex items-center gap-2">
@@ -442,7 +491,7 @@ export default function HomePage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <AgentTimeline steps={activeScan.agentLog as AgentStep[]} />
+              <AgentTimeline steps={agentLog} />
             </CardContent>
           </Card>
         )}
@@ -456,7 +505,7 @@ export default function HomePage() {
             <span>•</span>
             <span>Shopify Admin API</span>
             <span>•</span>
-            <span>React + Express</span>
+            <span>React + Tailwind</span>
           </div>
           <p>Vibe Hack - NVIDIA GTC 2026 | Team Origins NYC</p>
           <PerplexityAttribution />
