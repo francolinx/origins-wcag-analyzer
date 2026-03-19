@@ -24,9 +24,10 @@ import {
   crawlPage,
   analyzeViolations,
   generateReport,
-  shopifyFixerRecommend,
+  shopifyFixerExecute,
   type Violation,
   type AgentStep,
+  type ShopifyFix,
 } from "@/lib/nemotron";
 
 const GRADE_COLORS: Record<string, string> = {
@@ -153,6 +154,7 @@ interface ScanResult {
 export default function HomePage() {
   const [url, setUrl] = useState("https://originsnyc.com");
   const [apiKey, setApiKey] = useState("");
+  const [shopifyToken, setShopifyToken] = useState("");
   const [enableShopify, setEnableShopify] = useState(true);
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -220,18 +222,21 @@ export default function HomePage() {
       setProgress(80);
       addLog("📊 Reporter Agent", "Report complete", `Score: ${report.score}/100 (${report.grade}) - ${report.summary}`);
 
-      // Agent 4: Shopify Fixer
-      let fixes: any[] = [];
-      if (enableShopify) {
-        setStatusText("Generating Shopify fixes...");
-        setProgress(90);
-        addLog("🔧 Shopify Fixer Agent", "Analyzing fixable violations", "Generating Shopify Admin API mutations for originsnyc.com");
+      // Agent 4: Shopify Fixer — ACTUALLY WRITES to Shopify theme
+      let fixes: ShopifyFix[] = [];
+      if (enableShopify && shopifyToken) {
+        setStatusText("Writing fixes to Shopify theme...");
+        setProgress(85);
+        addLog("🔧 Shopify Fixer Agent", "Connecting to Shopify Admin API", "Authenticating with originsnyc.myshopify.com to write theme code");
 
-        fixes = await shopifyFixerRecommend(violations, apiKey);
+        fixes = await shopifyFixerExecute(violations, crawlData, apiKey, shopifyToken);
+        const applied = fixes.filter(f => f.status === "applied").length;
+        const failed = fixes.filter(f => f.status === "failed").length;
+        setProgress(95);
         addLog(
           "🔧 Shopify Fixer Agent",
-          "Fix recommendations ready",
-          `${fixes.length} Shopify API fixes recommended for originsnyc.com`
+          `${applied} fixes applied to Shopify theme`,
+          `${applied} applied, ${failed} failed — changes are LIVE on originsnyc.com`
         );
       }
 
@@ -294,8 +299,8 @@ export default function HomePage() {
           </h2>
           <p className="text-sm text-zinc-400 max-w-xl mx-auto">
             Multi-agent AI system that crawls your site, analyzes WCAG compliance
-            using NVIDIA Nemotron, generates a report, and recommends Shopify API
-            fixes for originsnyc.com.
+            using NVIDIA Nemotron, generates a report, and automatically writes
+            accessibility fixes to your Shopify theme code.
           </p>
         </div>
 
@@ -343,6 +348,20 @@ export default function HomePage() {
                 />
               </div>
             </div>
+            {enableShopify && (
+              <div className="mb-4">
+                <label className="text-sm text-zinc-400 mb-1 block">Shopify Access Token</label>
+                <Input
+                  data-testid="input-shopify-token"
+                  type="password"
+                  value={shopifyToken}
+                  onChange={(e) => setShopifyToken(e.target.value)}
+                  placeholder="shpat_..."
+                  className="bg-zinc-800 border-zinc-700"
+                />
+                <p className="text-xs text-zinc-600 mt-1">Admin API access token for originsnyc.myshopify.com — fixes write directly to your theme</p>
+              </div>
+            )}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Switch
@@ -447,32 +466,47 @@ export default function HomePage() {
               </Card>
             )}
 
-            {/* Shopify Fixes */}
+            {/* Shopify Fixes — LIVE APPLIED */}
             {result.fixes.length > 0 && (
               <Card className="bg-zinc-900 border-zinc-800">
                 <CardHeader>
                   <CardTitle className="text-sm flex items-center gap-2">
                     <ShoppingBag className="w-4 h-4 text-green-400" />
-                    Shopify Fix Recommendations ({result.fixes.length})
+                    Shopify Theme Fixes Applied ({result.fixes.length})
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3">
                   {result.fixes.map((fix: any, i: number) => (
                     <div
                       key={i}
-                      className="p-3 rounded-lg bg-zinc-800/50 border border-zinc-700"
+                      className={`p-3 rounded-lg border ${
+                        fix.status === "applied"
+                          ? "bg-green-500/5 border-green-500/30"
+                          : fix.status === "failed"
+                          ? "bg-red-500/5 border-red-500/30"
+                          : "bg-zinc-800/50 border-zinc-700"
+                      }`}
                       data-testid={`fix-${i}`}
                     >
                       <div className="flex items-center gap-2 mb-2">
-                        <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" />
-                        <p className="text-sm font-medium">{fix.action || "Shopify API Fix"}</p>
+                        {fix.status === "applied" ? (
+                          <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" />
+                        ) : (
+                          <XCircle className="w-4 h-4 text-red-400 shrink-0" />
+                        )}
+                        <p className="text-sm font-medium">{fix.description}</p>
+                        <Badge variant="outline" className={`ml-auto text-xs ${
+                          fix.status === "applied" ? "text-green-400 border-green-500/30" : "text-red-400 border-red-500/30"
+                        }`}>
+                          {fix.status}
+                        </Badge>
                       </div>
-                      <p className="text-xs text-zinc-400 mb-2">{fix.details}</p>
-                      {fix.shopifyCode && (
-                        <pre className="text-xs bg-black/30 p-2 rounded overflow-x-auto text-green-300">
-                          {fix.shopifyCode}
-                        </pre>
-                      )}
+                      <p className="text-xs text-zinc-400 mb-1">
+                        <span className="font-medium">File:</span> {fix.file}
+                      </p>
+                      <p className="text-xs text-zinc-400">
+                        <span className="font-medium">Action:</span> {fix.action} — {fix.details}
+                      </p>
                     </div>
                   ))}
                 </CardContent>
