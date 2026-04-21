@@ -2,6 +2,8 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import { isLangGraphAvailable } from "./langgraph";
+import path from "path";
 
 const app = express();
 const httpServer = createServer(app);
@@ -21,6 +23,7 @@ app.use(
 );
 
 app.use(express.urlencoded({ extended: false }));
+app.use("/artifacts", express.static(path.resolve("data", "artifacts")));
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
@@ -60,6 +63,14 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  if (process.env.REQUIRE_LANGGRAPH === "true") {
+    const available = await isLangGraphAvailable();
+    if (!available) {
+      console.error("REQUIRE_LANGGRAPH=true but @langchain/langgraph is not installed.");
+      process.exit(1);
+    }
+  }
+
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {

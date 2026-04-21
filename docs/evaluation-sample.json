@@ -1,0 +1,26 @@
+{
+  "evaluatedAt": "2026-04-21T00:00:00.000Z",
+  "targetUrl": "https://example.com",
+  "pagesScanned": 3,
+  "totalFindings": 7,
+  "severityBreakdown": {
+    "critical": 1,
+    "serious": 2,
+    "moderate": 3,
+    "minor": 1
+  },
+  "findingsWithScreenshotEvidence": 0,
+  "findingsWithWcagEvidence": 7,
+  "crossCheckOverlap": {
+    "primaryFindings": 6,
+    "secondaryFindings": 2,
+    "overlap": 1
+  },
+  "comparisonCheck": {
+    "works": true,
+    "repeatedIssueCount": 3,
+    "resolvedIssueCount": 1,
+    "newIssueCount": 4
+  },
+  "notes": "Screenshot evidence is environment-dependent until Playwright binary support is available."
+}
